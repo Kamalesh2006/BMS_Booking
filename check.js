@@ -23,13 +23,6 @@ const SATURDAYS_TO_CHECK = Number(process.env.SATURDAYS_TO_CHECK || 2);
 const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
 const PROXY_URL = process.env.PROXY_URL || '';
 
-// Seeds the synthetic hardware profile. Distinct per run so the hourly checks
-// do not present one repeating machine to the same origin, and reproducible:
-// the seed is printed, so a blocked run can be replayed exactly by setting
-// FINGERPRINT_SEED to the value from its log.
-// The run attempt is folded in because re-running a workflow keeps the same
-// GITHUB_RUN_ID - and a re-run is usually a retry of one that got blocked, so
-// it is exactly when a different machine is wanted.
 const FINGERPRINT_SEED = process.env.FINGERPRINT_SEED ||
   (process.env.GITHUB_RUN_ID &&
     `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT || 1}`) ||

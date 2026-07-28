@@ -40,13 +40,6 @@ function mulberry32(a) {
 
 // --- hardware tables ---------------------------------------------------------
 
-/**
- * ANGLE's D3D11 backend reports the same limits regardless of which card is
- * underneath, so these are shared and only the vendor/renderer strings vary.
- * That is also what makes them worth spoofing: SwiftShader's numbers are
- * visibly smaller (8192 max texture, 8192 viewport) and give the software
- * rasteriser away even when the renderer string has been rewritten.
- */
 const ANGLE_D3D11_LIMITS = {
   MAX_TEXTURE_SIZE: 16384,
   MAX_CUBE_MAP_TEXTURE_SIZE: 16384,
