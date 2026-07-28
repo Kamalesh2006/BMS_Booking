@@ -1,0 +1,8 @@
+# Contains your EmailJS PRIVATE key - must never reach the repo.
+.env
+.env.*
+!.env.example
+
+node_modules/
+debug/
+*.log

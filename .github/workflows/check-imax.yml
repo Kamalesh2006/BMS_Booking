@@ -1,0 +1,107 @@
+name: Check IMAX Availability
+
+on:
+  schedule:
+    # Hourly, on the hour. GitHub's scheduler is best-effort and slips under
+    # load, so treat this as "roughly hourly", not a guarantee.
+    # The job makes exactly ONE request to BookMyShow per run.
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      saturdays:
+        description: 'Upcoming Saturdays to watch (1 = this week only)'
+        required: false
+        default: '2'
+
+permissions:
+  contents: write
+
+# Never let two runs race on state.json. Queue rather than cancel, so a run
+# that might catch the opening is not thrown away.
+concurrency:
+  group: imax-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      # Cache the browser download - ~150 MB, and this job runs often.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json', 'package.json') }}
+
+      # Real Google Chrome is the preferred target (better fingerprint parity
+      # than bundled Chromium); Chromium is installed as the fallback.
+      - name: Install browsers
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright install chrome || echo "Chrome channel unavailable; using Chromium"
+
+      - name: Check availability
+        env:
+          TARGET_URL_BASE: ${{ vars.TARGET_URL_BASE }}
+          SATURDAYS_TO_CHECK: ${{ github.event.inputs.saturdays || '2' }}
+          BLOCK_ALERT_THRESHOLD: '3'
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+          EMAILJS_SERVICE_ID: ${{ secrets.EMAILJS_SERVICE_ID }}
+          EMAILJS_TEMPLATE_ID: ${{ secrets.EMAILJS_TEMPLATE_ID }}
+          # Separate template for "checker is blocked" mail.
+          EMAILJS_FAILURE_TEMPLATE_ID: ${{ secrets.EMAILJS_FAILURE_TEMPLATE_ID }}
+          EMAILJS_PUBLIC_KEY: ${{ secrets.EMAILJS_PUBLIC_KEY }}
+          EMAILJS_PRIVATE_KEY: ${{ secrets.EMAILJS_PRIVATE_KEY }}
+          # Optional residential proxy - the real fix if GitHub's IPs get banned.
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: node check.js
+
+      # Screenshot + HTML of whatever BookMyShow returned when it blocked us.
+      # This is how you find out *why* a run failed.
+      - name: Upload debug artifacts
+        if: always() && hashFiles('debug/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ github.run_id }}-${{ github.run_attempt }}
+          path: debug/
+          retention-days: 5
+
+      # Persist "already notified" markers so you get one alert per date, not
+      # one every hour. Runs even when the check step exits non-zero,
+      # because the consecutive-block counter lives in state.json too.
+      - name: Commit updated state
+        if: always()
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          if git diff --staged --quiet; then
+            echo "No state change."
+            exit 0
+          fi
+          git commit -m "Update state [skip ci]"
+          # A queued run may have pushed in the meantime.
+          for i in 1 2 3; do
+            if git push; then
+              echo "Pushed."
+              exit 0
+            fi
+            echo "Push rejected, rebasing (attempt $i)..."
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            sleep 5
+          done
+          echo "Could not push state after 3 attempts." >&2
+          exit 1

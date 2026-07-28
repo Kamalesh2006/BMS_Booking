@@ -1,0 +1,17 @@
+{
+  "name": "imax-saturday-checker",
+  "version": "2.0.0",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20.6"
+  },
+  "scripts": {
+    "check": "node check.js",
+    "check:local": "node --env-file=.env check.js",
+    "browsers": "playwright install --with-deps chromium && playwright install chrome"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}
