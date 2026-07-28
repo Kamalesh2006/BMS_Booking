@@ -34,6 +34,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # checkout pins the tree to the SHA that triggered this run, which may
+      # predate state written by an earlier run. Take state.json from the
+      # branch tip so "already notified" markers are current - otherwise a
+      # stale map re-sends an alert that has already gone out. Code and
+      # workflow stay at the trigger SHA; only state is advanced.
+      - name: Sync state to branch tip
+        run: |
+          git fetch origin "${GITHUB_REF_NAME}"
+          git checkout "origin/${GITHUB_REF_NAME}" -- state.json || \
+            echo "No state.json on the branch tip yet; starting fresh."
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -91,21 +102,36 @@ jobs:
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state.json
-          if git diff --staged --quiet; then
-            echo "No state change."
-            exit 0
-          fi
-          git commit -m "Update state [skip ci]"
-          # A queued run may have pushed in the meantime.
-          for i in 1 2 3; do
-            if git push; then
+
+          # state.json is rewritten wholesale every run, so a concurrent push
+          # makes rebase conflict on every line rather than merge. Never
+          # rebase it: keep the state this run computed, reset onto the branch
+          # tip, and replay the file there. This run read the tip's state at
+          # startup and the concurrency group keeps runs serialised, so our
+          # copy is the newest - last writer wins is the correct outcome.
+          cp state.json "${RUNNER_TEMP}/state.ours.json"
+
+          for i in 1 2 3 4 5; do
+            git fetch origin "${GITHUB_REF_NAME}"
+            git reset --hard "origin/${GITHUB_REF_NAME}"
+            cp "${RUNNER_TEMP}/state.ours.json" state.json
+
+            if git diff --quiet -- state.json; then
+              echo "No state change."
+              exit 0
+            fi
+
+            git add state.json
+            git commit -m "Update state [skip ci]"
+
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
               echo "Pushed."
               exit 0
             fi
-            echo "Push rejected, rebasing (attempt $i)..."
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
-            sleep 5
+
+            echo "Push rejected (attempt $i) - another run pushed first; replaying."
+            sleep $(( i * 3 ))
           done
-          echo "Could not push state after 3 attempts." >&2
+
+          echo "Could not push state after 5 attempts." >&2
           exit 1
