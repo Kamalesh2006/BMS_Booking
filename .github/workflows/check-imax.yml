@@ -16,6 +16,10 @@ on:
         description: 'Upcoming Saturdays to watch (1 = this week only)'
         required: false
         default: '2'
+      fingerprint_seed:
+        description: 'Replay a specific hardware profile (seed from a run log). Blank = derive from the run id.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -72,6 +76,10 @@ jobs:
           TARGET_URL_BASE: ${{ vars.TARGET_URL_BASE }}
           SATURDAYS_TO_CHECK: ${{ github.event.inputs.saturdays || '2' }}
           BLOCK_ALERT_THRESHOLD: '3'
+          # Blank falls back to GITHUB_RUN_ID + attempt, so each hourly run
+          # presents a different machine. Set it to a seed printed in an earlier
+          # log to reproduce that run's exact fingerprint.
+          FINGERPRINT_SEED: ${{ github.event.inputs.fingerprint_seed }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
           EMAILJS_SERVICE_ID: ${{ secrets.EMAILJS_SERVICE_ID }}
           EMAILJS_TEMPLATE_ID: ${{ secrets.EMAILJS_TEMPLATE_ID }}

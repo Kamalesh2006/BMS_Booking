@@ -2,8 +2,10 @@ import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import {
-  windowsUserAgent, LAUNCH_ARGS, CONTEXT_OPTIONS, stealthInitScript, actHuman, rand
+  windowsUserAgent, launchArgs, contextOptions, stealthInitScript,
+  probeClientHints, fixAcceptLanguage, actHuman, rand
 } from './stealth.js';
+import { buildProfile, describeProfile } from './fingerprint.js';
 import { extractInitialState, analyseState } from './extract.js';
 
 // The event code in this URL is the IMAX 2D event (the-odyssey-imax-2d), so a
@@ -20,6 +22,18 @@ const DEBUG_DIR = 'debug';
 const SATURDAYS_TO_CHECK = Number(process.env.SATURDAYS_TO_CHECK || 2);
 const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
 const PROXY_URL = process.env.PROXY_URL || '';
+
+// Seeds the synthetic hardware profile. Distinct per run so the hourly checks
+// do not present one repeating machine to the same origin, and reproducible:
+// the seed is printed, so a blocked run can be replayed exactly by setting
+// FINGERPRINT_SEED to the value from its log.
+// The run attempt is folded in because re-running a workflow keeps the same
+// GITHUB_RUN_ID - and a re-run is usually a retry of one that got blocked, so
+// it is exactly when a different machine is wanted.
+const FINGERPRINT_SEED = process.env.FINGERPRINT_SEED ||
+  (process.env.GITHUB_RUN_ID &&
+    `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT || 1}`) ||
+  `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 // Consecutive blind runs before the failure alert fires. Counts any run that
 // could not read availability, not just HTTP blocks.
@@ -175,19 +189,24 @@ async function dumpDebug(page, label) {
 
 // --- fetch ------------------------------------------------------------------
 
-async function launchBrowser() {
+/**
+ * The window size is a launch flag, so the browser is launched per attempt
+ * rather than once per run - a retry that reuses the blocked attempt's window
+ * geometry is only half a new machine.
+ */
+async function launchBrowser(profile) {
   const opts = {
     headless: true,
-    args: LAUNCH_ARGS,
+    args: launchArgs(profile),
     ...(PROXY_URL ? { proxy: { server: PROXY_URL } } : {})
   };
   try {
     const b = await chromium.launch({ ...opts, channel: 'chrome' });
-    console.log(`Launched Google Chrome ${b.version()}`);
+    console.log(`   Google Chrome ${b.version()}`);
     return b;
   } catch {
     const b = await chromium.launch(opts);
-    console.log(`Launched bundled Chromium ${b.version()} (Chrome channel unavailable)`);
+    console.log(`   bundled Chromium ${b.version()} (Chrome channel unavailable)`);
     return b;
   }
 }
@@ -198,29 +217,48 @@ async function launchBrowser() {
  * Do not add a homepage warm-up. Visiting the homepage first makes Cloudflare
  * issue a bot-management cookie that gets the next request 403'd; going
  * straight to the target on a cold context returns 200. Each attempt therefore
- * uses a brand-new context so no cookie is ever carried over.
+ * uses a brand-new browser and context so no cookie is ever carried over.
+ *
+ * Each attempt also draws a *different* hardware profile: retrying a block with
+ * the fingerprint that was just refused is the one thing guaranteed not to
+ * help.
  */
-async function fetchPage(browser) {
-  const userAgent = windowsUserAgent(browser.version());
-
+async function fetchPage() {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const context = await browser.newContext({ ...CONTEXT_OPTIONS, userAgent });
-    await context.addInitScript(stealthInitScript());
+    const profile = buildProfile(`${FINGERPRINT_SEED}#${attempt}`);
+    console.log(`\n   attempt ${attempt}/${MAX_ATTEMPTS}`);
+    console.log(`   posing as: ${describeProfile(profile)}`);
+
+    const browser = await launchBrowser(profile);
+
+    // The UA has to be built from the browser that actually launched, so the
+    // major version in the UA string matches the engine behind it.
+    profile.chromeVersion = browser.version();
+    const userAgent = windowsUserAgent(profile.chromeVersion);
+
+    // Client-hint brands come from the browser itself, with "HeadlessChrome"
+    // rewritten. Has to happen before the real context exists, because
+    // extraHTTPHeaders are fixed at context creation.
+    profile.uaBrands = await probeClientHints(browser);
+
+    const context = await browser.newContext(contextOptions(profile, userAgent));
+    await fixAcceptLanguage(context, profile);
+    await context.addInitScript(stealthInitScript, profile);
     const page = await context.newPage();
 
     try {
       const res = await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
       const status = res?.status() ?? 0;
       await page.waitForTimeout(rand(2500, 4500));
-      await actHuman(page);
+      await actHuman(page, profile);
 
       const html = await page.content();
       const block = classifyBlock(status, html);
 
       if (block) {
-        console.log(`   attempt ${attempt}/${MAX_ATTEMPTS} blocked: ${block}`);
+        console.log(`   blocked: ${block}`);
         await dumpDebug(page, `blocked-attempt${attempt}`);
-        await context.close();
+        await browser.close();
         if (attempt < MAX_ATTEMPTS) {
           const backoff = rand(8000, 20000) * attempt;
           console.log(`   backing off ${Math.round(backoff / 1000)}s`);
@@ -231,12 +269,12 @@ async function fetchPage(browser) {
       }
 
       console.log(`   loaded ok (HTTP ${status}, ${html.length} bytes)`);
-      await context.close();
+      await browser.close();
       return { blocked: false, html };
     } catch (e) {
-      console.log(`   attempt ${attempt}/${MAX_ATTEMPTS} error: ${e.message}`);
+      console.log(`   error: ${e.message}`);
       await dumpDebug(page, `error-attempt${attempt}`).catch(() => {});
-      await context.close().catch(() => {});
+      await browser.close().catch(() => {});
       if (attempt === MAX_ATTEMPTS) {
         return { blocked: true, reason: `navigation error: ${e.message}` };
       }
@@ -255,10 +293,8 @@ async function main() {
   console.log(`Watching:    ${saturdays.map(humanDate).join(', ')}`);
   if (PROXY_URL) console.log('Using proxy from PROXY_URL');
 
-  const browser = await launchBrowser();
   console.log(`\nLoading ${BASE_URL}`);
-  const fetched = await fetchPage(browser);
-  await browser.close();
+  const fetched = await fetchPage();
 
   // Every way of ending up unable to read availability funnels through here,
   // so a page that loads but no longer parses raises the alarm just like a 403.

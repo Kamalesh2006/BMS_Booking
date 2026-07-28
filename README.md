@@ -28,7 +28,11 @@ Today (IST): 2026-07-28
 Watching:    Saturday, 1 August 2026, Saturday, 8 August 2026
 
 Loading https://in.bookmyshow.com/movies/chennai/the-odyssey/buytickets/ET00480917
-   loaded ok (HTTP 200, 290259 bytes)
+
+   attempt 1/3
+   posing as: nvidia-gtx1650-desktop | 6 cores | 16 GB (deviceMemory 8) | 1536x864@1.25 | viewport 1536x713 | seed 99887766-1#1
+   Google Chrome 144.0.7559.132
+   loaded ok (HTTP 200, 282745 bytes)
 
 Booking window on sale: 20260728, 20260729
 Strip covers:           20260728, 20260729, 20260730, 20260731, 20260801, 20260802, 20260803
@@ -99,10 +103,59 @@ No format filtering needed.
 - **Use a Windows user-agent.** Chrome's honest Linux UA gets 403'd by a WAF rule.
   The identical request with a Windows UA passes.
 
-`stealth.js` also handles the usual headless tells — `navigator.webdriver`, missing
-`window.chrome`, empty plugin list, SwiftShader in the WebGL strings, screen
-metrics — and adds some mouse and scroll activity. Real Google Chrome is used when
-available, bundled Chromium as fallback.
+### 4. A repeated fingerprint is its own signal
+
+Loading the same URL every hour from a machine that reports byte-identical
+hardware every time is the pattern that earns you a CAPTCHA even when each
+individual request looks fine. So `fingerprint.js` generates a **synthetic
+machine** per run — GPU, CPU core count, RAM, display, storage quota, network —
+and `stealth.js` installs it.
+
+The thing that actually matters is **coherence, not randomness**. Bot scoring
+doesn't look for unusual values, it looks for combinations that can't exist. A
+profile is therefore built outward from a machine archetype, and everything else
+is derived from it:
+
+| Claim | Constrained by |
+|---|---|
+| `deviceMemory` | Capped at 8 and quantised. A 32 GB box **must** still report 8 — reporting 16 is not a rare machine, it's an impossible one |
+| `hardwareConcurrency` | Drawn from what that archetype ships with |
+| WebGL renderer | Paired vendor/renderer strings, plus the **D3D11 limits** — rewriting `RTX 3060` while `MAX_TEXTURE_SIZE` stays at SwiftShader's 8192 is worse than not lying |
+| `screen.avail*` | Smaller than `screen.*` by a taskbar; headless makes them equal |
+| `outerHeight` | Larger than `innerHeight` by the toolbar; headless makes them equal |
+| `jsHeapSizeLimit` | V8 picks it from installed RAM, so it has to track the RAM figure |
+| `navigator.languages` | Must match the `Accept-Language` header, in both directions |
+
+Three findings from building it that I didn't expect:
+
+- **`--disable-gpu` was making things worse.** It removes the WebGL context
+  entirely, and a desktop Chrome with no WebGL is rarer than one with a strange
+  renderer. Dropping it and rewriting SwiftShader's strings *and limits* is the
+  better trade.
+- **Bundled Chromium announces itself in `sec-ch-ua`** as
+  `"HeadlessChrome";v="151"`. No amount of JavaScript patching helps — it's on
+  the wire before your code runs. It can't be hardcoded either, since the GREASE
+  brand and its punctuation change every release, so the value is read off the
+  browser itself via a throwaway loopback request and rewritten. (Real Chrome
+  gets this right and is left alone.)
+- **Most stealth snippets add `chrome.runtime`. Real Chrome doesn't have it**
+  unless an extension is installed — I checked. Adding it is a flag, not a fix.
+
+Each retry within a run also draws a *different* machine: re-requesting with the
+fingerprint that was just refused is the one thing guaranteed not to help.
+
+Canvas and audio readbacks get a small deterministic perturbation seeded from the
+profile, so the hash is stable within a page load — a canvas that returns
+different bytes on two reads is a louder signal than a stable odd one — while
+differing between runs.
+
+The seed is printed in every run's log, and setting `FINGERPRINT_SEED` to it
+reproduces that machine exactly, which is what makes a blocked run debuggable.
+
+Real Google Chrome is used when available, bundled Chromium as fallback. Both are
+verified to produce a self-consistent fingerprint, but Chrome is the better
+target — it needs fewer corrections, because most of what's being corrected *is*
+the difference between it and headless Chromium.
 
 ### What this does *not* do
 
@@ -110,9 +163,14 @@ I want to be straight about the limits, because plenty of blog posts on this top
 aren't:
 
 - It **does not** solve an interactive CAPTCHA. Nothing here clicks a checkbox.
+  The fingerprinting is aimed at not being *served* one; once you have been, it's
+  no help at all.
 - It **does not** help if the IP itself is banned. That's decided at the network
   layer before any of your JavaScript runs. If GitHub's runner IPs get blocked, the
   only real fix is a residential proxy (`PROXY_URL`).
+- It **does not** spoof fonts, and TLS/HTTP2 fingerprinting is untouched — both
+  are below the level Playwright gives you access to. A determined WAF can still
+  tell.
 - It's tuned to one movie in one city. See [Pointing it elsewhere](#pointing-it-elsewhere).
 
 When it *is* blocked it says so loudly and saves a screenshot, rather than
@@ -212,7 +270,8 @@ Everything else — date logic, blocking, alerts — is city and movie agnostic.
 | Env var | Default | Meaning |
 |---|---|---|
 | `SATURDAYS_TO_CHECK` | `2` | Set `1` for this week's Saturday only. BookMyShow publishes ~7 days, so further-out Saturdays just read "not in booking window yet" until they come into range |
-| `MAX_ATTEMPTS` | `3` | Retries (fresh context + backoff) when blocked |
+| `MAX_ATTEMPTS` | `3` | Retries when blocked. Each gets a fresh browser, a fresh context and a **different** hardware profile |
+| `FINGERPRINT_SEED` | run id + attempt | Replay a specific machine. Copy the seed from a run's `posing as:` log line to reproduce it exactly |
 | `BLOCK_ALERT_THRESHOLD` | `3` | Consecutive failed runs before it emails to say it's blind |
 | `PROXY_URL` | — | Proxy, e.g. `http://user:pass@host:port` |
 
@@ -254,7 +313,8 @@ proportionally quicker too.
 |---|---|
 | `check.js` | Orchestration — dates, fetching, notification, state |
 | `extract.js` | Parses `__INITIAL_STATE__` into per-date availability |
-| `stealth.js` | Fingerprint hardening and human-ish activity |
+| `fingerprint.js` | Generates one coherent synthetic machine per run — GPU, CPU, RAM, display |
+| `stealth.js` | Applies that machine to the browser, plus human-ish activity |
 | `state.json` | What's already been alerted, plus the block counter (CI commits this) |
 | `.github/workflows/check-imax.yml` | The schedule |
 
