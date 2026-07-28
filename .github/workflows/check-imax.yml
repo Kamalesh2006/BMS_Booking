@@ -3,13 +3,13 @@ name: Check IMAX Availability
 
 on:
   schedule:
-    # Hourly, at :07. Avoid the top-of-the-hour (":00") slot: it's the most
-    # congested cron minute on all of GitHub and runs get silently dropped
-    # under load (confirmed: this workflow missed its :00 runs twice in a
-    # row after being registered). GitHub's scheduler is still best-effort,
-    # so treat this as "roughly hourly", not a guarantee.
+    # Every 15 min, on off-round minutes. GitHub's scheduler is best-effort
+    # and silently drops ticks - this workflow missed every scheduled run at
+    # both ':00' and ':07' after being registered. Four ticks an hour means a
+    # dropped one costs 15 minutes instead of a full hour. Round minutes
+    # (:00, :15, :30, :45) are the most contended, so they are avoided.
     # The job makes exactly ONE request to BookMyShow per run.
-    - cron: '7 * * * *'
+    - cron: '2,17,32,47 * * * *'
   workflow_dispatch:
     inputs:
       saturdays:
