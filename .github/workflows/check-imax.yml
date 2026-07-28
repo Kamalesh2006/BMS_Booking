@@ -1,3 +1,4 @@
+# Watches BookMyShow for IMAX seats opening on upcoming Saturdays.
 name: Check IMAX Availability
 
 on:
