@@ -17,6 +17,13 @@ const BASE_URL = (process.env.TARGET_URL_BASE ||
 const STATE_FILE = 'state.json';
 const DEBUG_DIR = 'debug';
 
+// Kill switch. Any non-empty value pauses the checker whatever the caller is -
+// an external cron, the Actions schedule, a manual run. The value is never
+// interpreted, only its presence: STOP=0 pauses just like STOP=1, because
+// "set means stopped" is the rule you can remember at 2am. Delete or blank it
+// to resume.
+const STOP = (process.env.STOP || '').trim();
+
 // Which weekday to watch, as a name ("monday") or a number (0=Sunday..6=Saturday).
 const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday',
                        'thursday', 'friday', 'saturday'];
@@ -31,6 +38,10 @@ function parseWeekday(value, fallback) {
 }
 
 const WATCH_WEEKDAY = parseWeekday(process.env.WATCH_WEEKDAY, 1);   // Monday
+
+// Pin specific dates instead of a weekday, e.g. "2026-08-15,2026-08-22".
+// Set, it wins over WATCH_WEEKDAY/DATES_TO_CHECK; blank, the weekday rule runs.
+const WATCH_DATES = (process.env.WATCH_DATES || '').trim();
 
 // BookMyShow only publishes ~7 days, so dates beyond the second read
 // "not in booking window yet" until they come into range.
@@ -95,6 +106,27 @@ function nextWeekdays(weekday, count) {
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return out;
+}
+
+/**
+ * Explicit dates from WATCH_DATES: comma-separated, YYYY-MM-DD or YYYYMMDD.
+ *
+ * Rejects rather than silently rounds a date that does not exist (a "31st" of
+ * a 30-day month), because a typo here means the checker watches the wrong day
+ * and never says so.
+ */
+function parseWatchDates(spec) {
+  const out = spec.split(',').map((s) => s.trim()).filter(Boolean).map((s) => {
+    const m = /^(\d{4})-?(\d{2})-?(\d{2})$/.exec(s);
+    if (!m) throw new Error(`WATCH_DATES: not a YYYY-MM-DD date: "${s}"`);
+    const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    if (urlDate(d) !== `${m[1]}${m[2]}${m[3]}`) {
+      throw new Error(`WATCH_DATES: no such date: "${s}"`);
+    }
+    return d;
+  });
+  if (out.length === 0) throw new Error('WATCH_DATES is set but lists no dates');
+  return out.sort((a, b) => a - b);
 }
 
 const urlDate = (d) =>
@@ -297,11 +329,35 @@ async function fetchPage() {
 // --- main -------------------------------------------------------------------
 
 async function main() {
-  const state = loadState();
-  const watchDates = nextWeekdays(WATCH_WEEKDAY, DATES_TO_CHECK);
+  // Before anything else: no page load, no email, no state write, exit 0 so a
+  // paused checker never looks like a broken one to cron or to Actions.
+  if (STOP) {
+    console.log(`STOPPED - the STOP variable is set (STOP=${STOP}).`);
+    if (/^(0|false|no|off)$/i.test(STOP)) {
+      console.log('Note: the value is ignored - being set at all is what pauses it.');
+    }
+    console.log('Nothing was checked; state.json was left untouched.');
+    console.log('Delete the STOP variable to resume.');
+    return;
+  }
 
-  console.log(`Today (IST): ${todayIST()}`);
-  console.log(`Watching:    ${watchDates.map(humanDate).join(', ')}`);
+  const state = loadState();
+  const watchDates = WATCH_DATES
+    ? parseWatchDates(WATCH_DATES)
+    : nextWeekdays(WATCH_WEEKDAY, DATES_TO_CHECK);
+
+  const today = todayIST();
+  console.log(`Today (IST): ${today}`);
+  console.log(`Watching:    ${watchDates.map(humanDate).join(', ')}` +
+    (WATCH_DATES ? '  (pinned via WATCH_DATES)' : ''));
+
+  // A pinned date that has passed can never go on sale, so the run would look
+  // healthy forever while watching nothing. Say so loudly.
+  const stale = watchDates.filter((d) => urlDate(d) < today.replace(/-/g, ''));
+  if (stale.length) {
+    console.warn(`\nWARNING: ${stale.map(humanDate).join(', ')} ` +
+      `${stale.length > 1 ? 'are' : 'is'} in the past - update WATCH_DATES.`);
+  }
   if (PROXY_URL) console.log('Using proxy from PROXY_URL');
 
   console.log(`\nLoading ${BASE_URL}`);

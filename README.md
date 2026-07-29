@@ -1,332 +1,259 @@
-# IMAX Showtime Checker
+# BookMyShow IMAX Availability Checker
 
-I wanted IMAX tickets for **The Odyssey** in Chennai on a Monday, and BookMyShow
-doesn't tell you when a date opens for booking — it just quietly becomes clickable
-at some point. Rather than refresh the page all day, I wrote this.
+I built this to avoid repeatedly refreshing BookMyShow while waiting for tickets
+to open. It watches a chosen movie, city, and format page, then emails me when
+one of the dates I care about becomes bookable.
 
-It checks the page once an hour on GitHub Actions and emails me the moment an
-upcoming Monday goes on sale. One HTTP request per run, and it runs whether or
-not my laptop is on.
+It is a notification tool only. It does not log in, reserve seats, add anything
+to a cart, or complete a booking.
 
-If you found this repo looking for how to scrape BookMyShow, skip to
-[What I learned about their bot protection](#what-i-learned-about-their-bot-protection).
-That's the part worth your time — most of the obvious approaches don't work, and
-I'd rather you not lose the afternoon I lost.
+## How it works
 
----
+On each run, the checker opens the BookMyShow buytickets page for the event I
+configured. It reads the page's server-rendered state and checks the availability
+status of the relevant dates. By default, it watches the next two Mondays in
+India time (IST).
 
-## What it does
+When a watched date opens:
 
-Once an hour it loads the movie's showtimes page, reads which dates are
-currently bookable, and compares that against the next couple of Mondays (the
-weekday is configurable — see [Tuning](#tuning)). When
-one flips to on-sale, I get an email with a direct booking link.
+- it sends an EmailJS email with a direct BookMyShow link;
+- it records that alert in state.json, so the same date is not emailed again;
+- if the date later disappears, its alert is re-armed.
 
-A real run looks like this:
+The workflow also detects when it cannot reliably read the page (for example, a
+Cloudflare block or a page-layout change). After three consecutive failed runs,
+it sends a separate failure email and uploads the returned HTML and screenshot
+as a GitHub Actions artifact.
 
-```
-Today (IST): 2026-07-29
-Watching:    Monday, 3 August 2026, Monday, 10 August 2026
+The checker makes one BookMyShow page request per run. Please keep the cadence
+reasonable and comply with BookMyShow's terms and policies.
 
-Loading https://in.bookmyshow.com/movies/chennai/the-odyssey/buytickets/ET00480917
+## Use your own copy
 
-   attempt 1/3
-   posing as: nvidia-gtx1650-desktop | 6 cores | 16 GB (deviceMemory 8) | 1536x864@1.25 | viewport 1536x713 | seed 99887766-1#1
-   Google Chrome 144.0.7559.132
-   loaded ok (HTTP 200, 282745 bytes)
+1. Fork this repository, or clone it into a repository you control.
+2. Keep .github/workflows/check-imax.yml; it is the GitHub Actions runner.
+3. Configure EmailJS and repository settings as described below.
+4. Run the **Check IMAX Availability** workflow once manually and verify that
+   you receive the test result in the Actions log.
 
-Booking window on sale: 20260729, 20260730
-Strip covers:           20260729, 20260730, 20260731, 20260801, 20260802, 20260803, 20260804
+For GitHub Actions, open **Settings → Actions → General** and allow workflows
+to have **Read and write permissions**. The workflow needs this to commit the
+updated state.json file after each run. Without it, the checker can run but
+will forget which alerts it has already sent.
 
-Monday, 3 August 2026 [20260803] -> listed but not on sale
-Monday, 10 August 2026 [20260810] -> not in booking window yet
-```
+## Configure the movie, city, format, and dates
 
-It remembers what it has already told me, so I get **one email per date** — not
-one an hour for a week. If a date goes on sale and then disappears, the
-alert re-arms.
+### Find the target URL
 
-There's a **second alert for when the checker itself breaks**. If three runs in a
-row fail to read the page, it emails me — from a different template, so it's
-obvious at a glance which kind of mail it is — with a link to the failing workflow
-run. A monitor that silently stops monitoring is worse than no monitor, and that's
-exactly how I'd miss the tickets.
+Open the exact BookMyShow listing you want to watch and copy its buytickets
+URL. It must contain the correct city and event code, for example:
 
----
+~~~
+https://in.bookmyshow.com/movies/chennai/example-film/buytickets/ET01234567
+~~~
 
-## What I learned about their bot protection
+Use the URL **without a trailing date**. The event code is format-specific, so
+the 2D, IMAX, 3D, and other listings for the same film may have different URLs.
+Choose the listing for the format you actually want.
 
-BookMyShow sits behind Cloudflare, and I got 403'd a lot before this worked. Three
-findings, all from testing against the live site rather than guessing:
+### Repository variables
 
-### 1. The showtimes API is unreachable, full stop
+In GitHub, go to **Settings → Secrets and variables → Actions → Variables** and
+add the following values.
 
-The page renders showtimes client-side by calling
-`/api/movies-data/v5/showtimes-by-event/primary-dynamic`. **That endpoint 403s for
-automated browsers** and I could not get past it. I tried headless and headful,
-bundled Chromium and real Google Chrome, honest and spoofed user-agents, with and
-without fingerprint patching. All 403.
+| Variable        | Required | Value |
+| --------------- | -------- | ----- |
+| TARGET_URL_BASE | Yes      | The buytickets URL found above, with no trailing date. |
+| WATCH_DATES     | No       | Specific dates to watch, comma-separated: 2026-08-15,2026-08-22. This overrides the weekday settings. |
+| WATCH_WEEKDAY   | No       | Weekday to watch, such as monday or friday. Names and 0–6 (0 is Sunday) work. Default: monday. |
+| DATES_TO_CHECK  | No       | Number of upcoming matching weekdays to watch. Default: 2. |
+| STOP            | No       | A non-empty value pauses every run. Delete the variable to resume; STOP=0 also pauses it. |
 
-So the rendered page shows *"Oops! Something went wrong"* and contains **zero
-showtimes**. If you scrape the DOM you get nothing — and worse, nothing looks
-exactly like "no tickets yet", so a naive scraper fails silently forever. That was
-my first version, and it would never have fired.
+Use either WATCH_DATES or the weekday settings:
 
-The way through: the same payload is **embedded in the HTML** as
-`window.__INITIAL_STATE__`, which ships with the document and isn't behind that
-rule.
+~~~
+# Watch the next two Fridays
+WATCH_WEEKDAY=friday
+DATES_TO_CHECK=2
 
-### 2. Inside that state, most of the obvious signals are traps
+# Or watch only these exact dates
+WATCH_DATES=2026-08-15,2026-08-22
+~~~
 
-| Candidate signal | Verdict |
-|---|---|
-| Rendered DOM showtimes | Always empty — the XHR is blocked |
-| `__INITIAL_STATE__` showtime list | **Useless.** Always contains *today's* schedule no matter which date the URL asks for. I verified it byte-identical for dates months out |
-| `IMAX 2D` chip's `isDisabled` flag | **Misleading.** It means "IMAX is the currently-selected format", not "unavailable" |
-| **Date strip `styleId`** | **This is the one.** Genuinely per-date |
+BookMyShow generally exposes only a short booking window. A future date may
+correctly show as unavailable until it enters that window.
 
-Each date in the strip carries `styleId: "date-selected"` / `"date-default"` when
-it's on sale, or `"date-disabled"` when it isn't — and disabled dates are rendered
-without a `cta` at all. One page load reports every date at once, which is why
-this only needs a single request per run instead of one per date.
+## Configure email alerts with EmailJS
 
-Because the event code in the URL (`ET00480917`) is the **IMAX 2D** event
-(`the-odyssey-imax-2d`), a date going on sale on this page *is* IMAX going on sale.
-No format filtering needed.
+EmailJS delivers both the ticket-open alert and the checker-failure alert.
 
-### 3. Two things get you a 200, and one is the opposite of standard advice
+1. Create an account at [EmailJS](https://www.emailjs.com/).
+2. Open **Email Services**, connect an email provider, and send its test email.
+3. In **Email Templates**, create two templates:
+   - a ticket-open template;
+   - a failure-warning template.
+4. In both templates set:
+   - **To Email** to {{to_email}};
+   - subject to {{subject}};
+   - message/body to {{message}}.
+5. On **Account → Security**, enable non-browser/API use and create or reveal a
+   private key. This project runs from Node.js on GitHub, not from a browser.
 
-- **Don't warm up the session.** Every scraping guide says to hit the homepage
-  first to look natural. Here it does the opposite: the homepage makes Cloudflare
-  issue a bot-management cookie that gets your *next* request 403'd. Going straight
-  to the target page on a cold context returns 200. Every retry in this code uses a
-  brand-new browser context so that cookie is never carried over.
-- **Use a Windows user-agent.** Chrome's honest Linux UA gets 403'd by a WAF rule.
-  The identical request with a Windows UA passes.
+EmailJS provides the values in its dashboard:
 
-### 4. A repeated fingerprint is its own signal
+| Value needed | Where to get it |
+| ------------ | --------------- |
+| Service ID   | Open **Email Services** and select the connected service. |
+| Template IDs | Open **Email Templates** and select each template. |
+| Public key   | **Account** page. |
+| Private key  | **Account → Security** after enabling private-key/API access. |
 
-Loading the same URL every hour from a machine that reports byte-identical
-hardware every time is the pattern that earns you a CAPTCHA even when each
-individual request looks fine. So `fingerprint.js` generates a **synthetic
-machine** per run — GPU, CPU core count, RAM, display, storage quota, network —
-and `stealth.js` installs it.
+The send request needs the service ID, template ID, public key, and template
+parameters; this is the EmailJS REST API contract. See the [EmailJS send API](https://www.emailjs.com/docs/rest-api/send/)
+and [EmailJS template guide](https://www.emailjs.com/docs/user-guide/creating-email-templates/)
+if the dashboard changes.
 
-The thing that actually matters is **coherence, not randomness**. Bot scoring
-doesn't look for unusual values, it looks for combinations that can't exist. A
-profile is therefore built outward from a machine archetype, and everything else
-is derived from it:
+### Repository secrets
 
-| Claim | Constrained by |
-|---|---|
-| `deviceMemory` | Capped at 8 and quantised. A 32 GB box **must** still report 8 — reporting 16 is not a rare machine, it's an impossible one |
-| `hardwareConcurrency` | Drawn from what that archetype ships with |
-| WebGL renderer | Paired vendor/renderer strings, plus the **D3D11 limits** — rewriting `RTX 3060` while `MAX_TEXTURE_SIZE` stays at SwiftShader's 8192 is worse than not lying |
-| `screen.avail*` | Smaller than `screen.*` by a taskbar; headless makes them equal |
-| `outerHeight` | Larger than `innerHeight` by the toolbar; headless makes them equal |
-| `jsHeapSizeLimit` | V8 picks it from installed RAM, so it has to track the RAM figure |
-| `navigator.languages` | Must match the `Accept-Language` header, in both directions |
+In GitHub, open **Settings → Secrets and variables → Actions → Secrets** and
+create these secrets. Do not commit any of them to .env, state.json, or the
+repository.
 
-Three findings from building it that I didn't expect:
+| Secret                      | Required                | What to store |
+| --------------------------- | ----------------------- | ------------- |
+| TO_EMAIL                    | Yes                     | The email address that should receive alerts. |
+| EMAILJS_SERVICE_ID          | Yes                     | EmailJS service ID. |
+| EMAILJS_TEMPLATE_ID         | Yes                     | Ticket-open template ID. |
+| EMAILJS_FAILURE_TEMPLATE_ID | Yes, for failure emails | Failure-warning template ID. |
+| EMAILJS_PUBLIC_KEY          | Yes                     | EmailJS public key. |
+| EMAILJS_PRIVATE_KEY         | Yes                     | EmailJS private key. Keep this private. |
+| PROXY_URL                   | No                      | A residential proxy URL, such as http://user:password@host:port, only if BookMyShow blocks the runner IP. |
 
-- **`--disable-gpu` was making things worse.** It removes the WebGL context
-  entirely, and a desktop Chrome with no WebGL is rarer than one with a strange
-  renderer. Dropping it and rewriting SwiftShader's strings *and limits* is the
-  better trade.
-- **Bundled Chromium announces itself in `sec-ch-ua`** as
-  `"HeadlessChrome";v="151"`. No amount of JavaScript patching helps — it's on
-  the wire before your code runs. It can't be hardcoded either, since the GREASE
-  brand and its punctuation change every release, so the value is read off the
-  browser itself via a throwaway loopback request and rewritten. (Real Chrome
-  gets this right and is left alone.)
-- **Most stealth snippets add `chrome.runtime`. Real Chrome doesn't have it**
-  unless an extension is installed — I checked. Adding it is a flag, not a fix.
+TO_EMAIL is not a credential, but I still store it as a secret because the
+workflow reads it from the secrets store and it avoids exposing a personal email
+address in repository settings.
 
-Each retry within a run also draws a *different* machine: re-requesting with the
-fingerprint that was just refused is the one thing guaranteed not to help.
+## Run and verify GitHub Actions
 
-Canvas and audio readbacks get a small deterministic perturbation seeded from the
-profile, so the hash is stable within a page load — a canvas that returns
-different bytes on two reads is a louder signal than a stable odd one — while
-differing between runs.
+Go to **Actions → Check IMAX Availability → Run workflow**. Leave the inputs
+blank to use the repository variables, or use watch_dates for a one-off test.
 
-The seed is printed in every run's log, and setting `FINGERPRINT_SEED` to it
-reproduces that machine exactly, which is what makes a blocked run debuggable.
+Check that the log shows the target URL, the watched dates, and a result for
+each date. If a run cannot read the page, download its **debug-artifacts**
+artifact from the workflow run before changing anything.
 
-Real Google Chrome is used when available, bundled Chromium as fallback. Both are
-verified to produce a self-consistent fingerprint, but Chrome is the better
-target — it needs fewer corrections, because most of what's being corrected *is*
-the difference between it and headless Chromium.
+The included schedule triggers at :02, :17, :32, and :47 of every hour. Runs
+are serialized so they cannot race while updating state.json.
 
-### What this does *not* do
+## If the GitHub Actions schedule is unreliable: trigger it with cron-job.org
 
-I want to be straight about the limits, because plenty of blog posts on this topic
-aren't:
+cron-job.org cannot run this Node.js project directly. Instead, it can call the
+GitHub API to start the existing workflow_dispatch workflow. GitHub then runs
+the project with the same repository variables, secrets, browser setup, and
+state handling.
 
-- It **does not** solve an interactive CAPTCHA. Nothing here clicks a checkbox.
-  The fingerprinting is aimed at not being *served* one; once you have been, it's
-  no help at all.
-- It **does not** help if the IP itself is banned. That's decided at the network
-  layer before any of your JavaScript runs. If GitHub's runner IPs get blocked, the
-  only real fix is a residential proxy (`PROXY_URL`).
-- It **does not** spoof fonts, and TLS/HTTP2 fingerprinting is untouched — both
-  are below the level Playwright gives you access to. A determined WAF can still
-  tell.
-- It's tuned to one movie in one city. See [Pointing it elsewhere](#pointing-it-elsewhere).
+### 1. Prevent duplicate schedules
 
-When it *is* blocked it says so loudly and saves a screenshot, rather than
-reporting "no tickets yet" and letting me miss the release.
+If you are moving to cron-job.org permanently, remove or comment out only the
+schedule section in .github/workflows/check-imax.yml, while keeping
+workflow_dispatch. Commit and push that change. Do **not** disable the whole
+workflow: a disabled workflow cannot be started by the API.
 
----
+The trigger section should begin like this after the change:
 
-## Run your own copy
+~~~yaml
+on:
+  workflow_dispatch:
+    inputs:
+      # keep the existing inputs below this line
+~~~
 
-### 1. Fork or clone
-Keep `.github/workflows/` intact — that path is what makes Actions pick it up.
+If you leave the built-in schedule enabled, both schedulers can start runs. The
+workflow will serialize them and state prevents duplicate ticket emails, but it
+creates unnecessary requests and Actions usage.
 
-> `.gitignore` excludes `.env`, which holds your EmailJS **private key**. Keep it
-> that way. Credentials belong in GitHub Secrets, not in the repo.
+### 2. Create a narrowly scoped GitHub token
 
-### 2. Set up EmailJS
-1. Sign up at <https://www.emailjs.com>
-2. **Email Service** → connect Gmail
-3. Create **two Email Templates**, both using the variables `{{subject}}`,
-   `{{message}}` and `{{to_email}}`:
-   - one for **"tickets are open"** alerts
-   - one for **"the checker is broken"** warnings
-   Two templates rather than one so a failure warning is visually distinct in the
-   inbox from the alert I'm actually waiting for — and so I can style the alert
-   loudly without every error mail shouting too.
-4. **Account → Security** → enable **"Allow non-browser use"**
+In GitHub, open **Settings → Developer settings → Personal access tokens →
+Fine-grained tokens**.
 
-That last step is not optional and the error message if you skip it is easy to
-miss — EmailJS returns `403: API access from non-browser environments is currently
-disabled`. This runs on a server, not in a browser. Enabling it is also what
-reveals your **Private Key**.
+- Limit the token to this one repository.
+- Give it **Actions: Read and write** repository permission.
+- Set an expiry date and copy the token immediately.
 
-### 3. Add repo secrets
-Settings → Secrets and variables → Actions → **Secrets**:
+Store this token only in cron-job.org's request header. It is a credential: do
+not place it in the repository, GitHub variables, or the cron job URL. GitHub's
+[workflow dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
+requires Actions: write for a fine-grained token.
 
-| Secret | Required | Purpose |
-|---|---|---|
-| `TO_EMAIL` | yes | Where alerts go |
-| `EMAILJS_SERVICE_ID` | yes | |
-| `EMAILJS_TEMPLATE_ID` | yes | Template for "tickets are open" |
-| `EMAILJS_FAILURE_TEMPLATE_ID` | no | Template for "checker is blocked". Defaults to `template_dx9v2zk` |
-| `EMAILJS_PUBLIC_KEY` | yes | |
-| `EMAILJS_PRIVATE_KEY` | yes | |
-| `PROXY_URL` | no | Residential proxy, if you get blocked |
+### 3. Create the cron-job.org HTTP job
 
-Then under **Variables**:
+In [cron-job.org](https://cron-job.org/), create a new job with these settings.
+Replace YOUR_OWNER, YOUR_REPOSITORY, and YOUR_BRANCH with your fork's values.
+YOUR_BRANCH is usually main or master.
 
-- `TARGET_URL_BASE` = `https://in.bookmyshow.com/movies/chennai/the-odyssey/buytickets/ET00480917`
-  (no trailing date — the script appends dates itself)
+| Field          | Value |
+| -------------- | ----- |
+| Title          | BookMyShow availability checker |
+| URL            | https://api.github.com/repos/YOUR_OWNER/YOUR_REPOSITORY/actions/workflows/check-imax.yml/dispatches |
+| Request method | POST |
+| Request body   | {"ref":"YOUR_BRANCH"} |
+| Header         | Authorization: Bearer YOUR_FINE_GRAINED_TOKEN |
+| Header         | Accept: application/vnd.github+json |
+| Header         | Content-Type: application/json |
+| Schedule       | Every 15 minutes, preferably at minutes 02, 17, 32, and 47 |
 
-### 4. Trigger it once by hand
-Actions → "Check IMAX Availability" → **Run workflow**. The log should print the
-booking window and a verdict per watched date.
+Enable failure notifications in cron-job.org as an extra signal that the GitHub
+API request itself failed. A successful dispatch normally returns a no-content
+response; the actual checker result will appear in the GitHub Actions run.
 
-Do this before trusting it. All my testing ran from a home IP in India; GitHub's
-runners have different IP reputation with Cloudflare, and that's the one variable
-I couldn't test from my machine.
+cron-job.org supports custom HTTP methods, headers, and request bodies. Its
+[job setup documentation](https://docs.cron-job.org/creating-cron-jobs.html)
+and [REST API reference](https://docs.cron-job.org/rest-api.html) are useful if
+its UI changes.
 
-### 5. Leave it alone
-It then fires hourly on its own and commits `state.json` back to the repo
-to remember what it has already sent.
+### 4. Test the external trigger
 
----
+Use cron-job.org's **Run now** option, then open the repository's **Actions**
+tab. A new **Check IMAX Availability** run should appear. If cron-job.org shows
+401 or 403, recreate the GitHub token, confirm its repository selection, and
+confirm it has **Actions: Read and write** permission.
 
-## Running locally
+## Run it locally
 
-```bash
+Local runs are useful for testing configuration before committing anything:
+
+~~~bash
 npm install
 npm run browsers
-cp .env.example .env     # fill it in
+cp .env.example .env
+# Fill in TARGET_URL_BASE and the EmailJS values in .env
 npm run check:local
-```
+~~~
 
----
+.env is ignored by Git. Keep it that way.
 
-## Pointing it elsewhere
+The local-only tuning values in .env.example are:
 
-For a different movie or city, change `TARGET_URL_BASE` to that film's
-`buytickets` URL. Grab it by opening the movie on BookMyShow and copying the URL
-without any trailing date.
+| Variable              | Default | Purpose |
+| --------------------- | ------- | ------- |
+| MAX_ATTEMPTS          | 3       | Page-load attempts in a single local run. |
+| BLOCK_ALERT_THRESHOLD | 3       | Consecutive unreadable runs before a failure email. |
+| FINGERPRINT_SEED      | Random  | Replays a fingerprint printed in an earlier log for debugging. |
 
-Two caveats:
+The hosted workflow currently fixes the failure threshold at three and accepts a
+fingerprint seed only through the manual workflow input. Adding these names as
+repository variables will not change the hosted workflow.
 
-- **The event code is format-specific.** `ET00480917` is the IMAX 2D event;
-  the regular 2D release of the same film is a different code (`ET00452034`).
-  If you want a specific format, make sure you've grabbed that format's URL —
-  otherwise you'll be watching the wrong thing.
-- **The region is baked into the URL** (`/chennai/`). The page state also carries a
-  region code, so use the URL for the city you actually want.
+## Operational notes
 
-Everything else — date logic, blocking, alerts — is city and movie agnostic.
-
----
-
-## Tuning
-
-| Env var | Default | Meaning |
-|---|---|---|
-| `WATCH_WEEKDAY` | `monday` | Weekday to watch — a name (`monday`, `sat`) or a number (`0`=Sunday … `6`=Saturday). Today counts if it already is that weekday |
-| `DATES_TO_CHECK` | `2` | Set `1` for the coming date only. BookMyShow publishes ~7 days, so further-out dates just read "not in booking window yet" until they come into range |
-| `MAX_ATTEMPTS` | `3` | Retries when blocked. Each gets a fresh browser, a fresh context and a **different** hardware profile |
-| `FINGERPRINT_SEED` | run id + attempt | Replay a specific machine. Copy the seed from a run's `posing as:` log line to reproduce it exactly |
-| `BLOCK_ALERT_THRESHOLD` | `3` | Consecutive failed runs before it emails to say it's blind |
-| `PROXY_URL` | — | Proxy, e.g. `http://user:pass@host:port` |
-
-On cadence: hourly, one request per run. Going faster mainly raises the odds of
-getting the IP blocked, which costs the alert entirely — and a blocked checker is
-worth far less than one that's an hour behind. If you do speed it up, note that
-`BLOCK_ALERT_THRESHOLD` counts *runs*, not time, so the failure alert gets
-proportionally quicker too.
-
----
-
-## When a run goes red
-
-- **Exit 2** means the page couldn't be read — blocked, or the page structure
-  changed. Download the run's **debug-artifacts**: it has a screenshot and the raw
-  HTML of exactly what came back. That artifact is how I diagnosed everything above.
-- **After 3 consecutive failed runs it emails me** (via the separate failure
-  template) to say it has gone blind, with a direct link to the failing workflow
-  run. A permanently broken checker must never quietly masquerade as "no tickets
-  yet" — that's the failure mode that would actually cost me the tickets.
-
-  "Failed" here means *any* run that couldn't determine availability, not just an
-  HTTP block. A page that returns 200 and then doesn't parse counts too — that's a
-  real case, and it's how a site redesign would show up.
-
-  It alerts **once** per outage, not every hour, and re-arms automatically
-  once a run succeeds. If the failure email itself can't be sent, it isn't marked
-  as delivered, so a transient EmailJS outage won't swallow the warning.
-- If BookMyShow changes their page structure, `extract.js` is the only file that
-  should need touching. It matches on widget *shape* rather than exact paths, so
-  layout shuffles shouldn't break it — but renaming `__INITIAL_STATE__` or the
-  `date-*` styleIds would.
-
----
-
-## Files
-
-| File | Role |
-|---|---|
-| `check.js` | Orchestration — dates, fetching, notification, state |
-| `extract.js` | Parses `__INITIAL_STATE__` into per-date availability |
-| `fingerprint.js` | Generates one coherent synthetic machine per run — GPU, CPU, RAM, display |
-| `stealth.js` | Applies that machine to the browser, plus human-ish activity |
-| `state.json` | What's already been alerted, plus the block counter (CI commits this) |
-| `.github/workflows/check-imax.yml` | The schedule |
-
-Node 20+, Playwright, no other dependencies.
-
----
-
-## A note on being polite
-
-This makes one request an hour to a page anyone can load in a browser,
-to answer a question their UI doesn't answer directly: *when does this date open?*
-It doesn't buy tickets, doesn't touch checkout, and doesn't hammer anything. If
-you reuse it, please keep it that way.
+- state.json is intentionally committed by GitHub Actions. It holds the
+  notification history and consecutive-failure count; do not delete it unless
+  you deliberately want to reset those records.
+- Set STOP to any non-empty value to pause safely. It makes no BookMyShow
+  request and does not alter state.json.
+- If BookMyShow blocks a GitHub-hosted IP, PROXY_URL is the available
+  configuration escape hatch. It should be a legitimate proxy you are
+  authorized to use.
+- A CAPTCHA, an IP ban, or a BookMyShow page redesign can still prevent this
+  checker from working. Treat its failure email as a prompt to check manually.

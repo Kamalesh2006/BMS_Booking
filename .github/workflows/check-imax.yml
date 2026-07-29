@@ -13,14 +13,18 @@ on:
     - cron: '2,17,32,47 * * * *'
   workflow_dispatch:
     inputs:
-      weekday:
-        description: 'Weekday to watch (name or 0=Sunday..6=Saturday)'
+      watch_dates:
+        description: 'Pin exact dates, e.g. 2026-08-15,2026-08-22. Blank = use the weekday rule below.'
         required: false
-        default: 'monday'
+        default: ''
+      weekday:
+        description: 'Weekday to watch (name or 0=Sunday..6=Saturday). Blank = repo variable WATCH_WEEKDAY, else monday.'
+        required: false
+        default: ''
       dates:
         description: 'How many upcoming matching dates to watch (1 = the coming one only)'
         required: false
-        default: '2'
+        default: ''
       fingerprint_seed:
         description: 'Replay a specific hardware profile (seed from a run log). Blank = derive from the run id.'
         required: false
@@ -37,6 +41,12 @@ concurrency:
 
 jobs:
   check:
+    # Kill switch. Create a repo variable named STOP (Settings -> Secrets and
+    # variables -> Actions -> Variables) and every run - scheduled or manual -
+    # is skipped without starting a runner. Delete the variable to resume.
+    # check.js enforces the same rule from its own env, for runs started
+    # outside Actions.
+    if: ${{ vars.STOP == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -79,8 +89,13 @@ jobs:
       - name: Check availability
         env:
           TARGET_URL_BASE: ${{ vars.TARGET_URL_BASE }}
-          WATCH_WEEKDAY: ${{ github.event.inputs.weekday || 'monday' }}
-          DATES_TO_CHECK: ${{ github.event.inputs.dates || '2' }}
+          # Scheduled runs have no inputs, so they fall through to the repo
+          # variables (Settings -> Secrets and variables -> Actions -> Variables).
+          # Retarget the checker by editing those - no code change, no push.
+          STOP: ${{ vars.STOP }}
+          WATCH_DATES: ${{ github.event.inputs.watch_dates || vars.WATCH_DATES }}
+          WATCH_WEEKDAY: ${{ github.event.inputs.weekday || vars.WATCH_WEEKDAY }}
+          DATES_TO_CHECK: ${{ github.event.inputs.dates || vars.DATES_TO_CHECK }}
           BLOCK_ALERT_THRESHOLD: '3'
           # Blank falls back to GITHUB_RUN_ID + attempt, so each hourly run
           # presents a different machine. Set it to a seed printed in an earlier
