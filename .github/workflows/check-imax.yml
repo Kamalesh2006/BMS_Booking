@@ -1,4 +1,5 @@
-# Watches BookMyShow for IMAX seats opening on upcoming Saturdays.
+# Watches BookMyShow for IMAX seats opening on the watched weekday (Mondays by
+# default - set the WATCH_WEEKDAY input to change it).
 name: Check IMAX Availability
 
 on:
@@ -12,8 +13,12 @@ on:
     - cron: '2,17,32,47 * * * *'
   workflow_dispatch:
     inputs:
-      saturdays:
-        description: 'Upcoming Saturdays to watch (1 = this week only)'
+      weekday:
+        description: 'Weekday to watch (name or 0=Sunday..6=Saturday)'
+        required: false
+        default: 'monday'
+      dates:
+        description: 'How many upcoming matching dates to watch (1 = the coming one only)'
         required: false
         default: '2'
       fingerprint_seed:
@@ -74,7 +79,8 @@ jobs:
       - name: Check availability
         env:
           TARGET_URL_BASE: ${{ vars.TARGET_URL_BASE }}
-          SATURDAYS_TO_CHECK: ${{ github.event.inputs.saturdays || '2' }}
+          WATCH_WEEKDAY: ${{ github.event.inputs.weekday || 'monday' }}
+          DATES_TO_CHECK: ${{ github.event.inputs.dates || '2' }}
           BLOCK_ALERT_THRESHOLD: '3'
           # Blank falls back to GITHUB_RUN_ID + attempt, so each hourly run
           # presents a different machine. Set it to a seed printed in an earlier

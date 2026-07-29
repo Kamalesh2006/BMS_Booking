@@ -17,9 +17,24 @@ const BASE_URL = (process.env.TARGET_URL_BASE ||
 const STATE_FILE = 'state.json';
 const DEBUG_DIR = 'debug';
 
-// BookMyShow only publishes ~7 days, so Saturdays beyond the second read
+// Which weekday to watch, as a name ("monday") or a number (0=Sunday..6=Saturday).
+const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday',
+                       'thursday', 'friday', 'saturday'];
+
+function parseWeekday(value, fallback) {
+  if (value === undefined || value === '') return fallback;
+  const raw = String(value).trim().toLowerCase();
+  if (/^\d$/.test(raw)) return Number(raw);
+  const i = WEEKDAY_NAMES.findIndex((n) => n.startsWith(raw));
+  if (i === -1) throw new Error(`WATCH_WEEKDAY: not a weekday: "${value}"`);
+  return i;
+}
+
+const WATCH_WEEKDAY = parseWeekday(process.env.WATCH_WEEKDAY, 1);   // Monday
+
+// BookMyShow only publishes ~7 days, so dates beyond the second read
 // "not in booking window yet" until they come into range.
-const SATURDAYS_TO_CHECK = Number(process.env.SATURDAYS_TO_CHECK || 2);
+const DATES_TO_CHECK = Number(process.env.DATES_TO_CHECK || 2);
 const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
 const PROXY_URL = process.env.PROXY_URL || '';
 
@@ -67,13 +82,16 @@ function todayIST() {
   }).format(new Date());
 }
 
-/** Upcoming Saturdays starting with this week's (today counts if it is Sat). */
-function nextSaturdays(count) {
+/**
+ * Upcoming dates that fall on `weekday`, starting with the coming one. Today
+ * counts if it already is that weekday - the day's shows are still bookable.
+ */
+function nextWeekdays(weekday, count) {
   const [y, m, d] = todayIST().split('-').map(Number);
   const cursor = new Date(Date.UTC(y, m - 1, d));   // UTC: no DST, no off-by-one
   const out = [];
   while (out.length < count) {
-    if (cursor.getUTCDay() === 6) out.push(new Date(cursor));
+    if (cursor.getUTCDay() === weekday) out.push(new Date(cursor));
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return out;
@@ -280,10 +298,10 @@ async function fetchPage() {
 
 async function main() {
   const state = loadState();
-  const saturdays = nextSaturdays(SATURDAYS_TO_CHECK);
+  const watchDates = nextWeekdays(WATCH_WEEKDAY, DATES_TO_CHECK);
 
   console.log(`Today (IST): ${todayIST()}`);
-  console.log(`Watching:    ${saturdays.map(humanDate).join(', ')}`);
+  console.log(`Watching:    ${watchDates.map(humanDate).join(', ')}`);
   if (PROXY_URL) console.log('Using proxy from PROXY_URL');
 
   console.log(`\nLoading ${BASE_URL}`);
@@ -318,7 +336,7 @@ async function main() {
     await blindRun('window.__INITIAL_STATE__ not found - page layout may have changed');
   }
 
-  const analysis = analyseState(parsed, saturdays.map(urlDate));
+  const analysis = analyseState(parsed, watchDates.map(urlDate));
   if (!analysis.ok) await blindRun(analysis.reason);
 
   if (state.consecutiveBlocks > 0) console.log('\nRecovered - page readable again.');
@@ -330,7 +348,7 @@ async function main() {
 
   for (let i = 0; i < analysis.results.length; i++) {
     const r = analysis.results[i];
-    const label = humanDate(saturdays[i]);
+    const label = humanDate(watchDates[i]);
     console.log(`\n${label} [${r.dateCode}] -> ${r.note}`);
 
     if (r.onSale && !state.notified[r.dateCode]) {

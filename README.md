@@ -1,11 +1,11 @@
-# IMAX Saturday Checker
+# IMAX Showtime Checker
 
-I wanted IMAX tickets for **The Odyssey** in Chennai on a Saturday, and BookMyShow
+I wanted IMAX tickets for **The Odyssey** in Chennai on a Monday, and BookMyShow
 doesn't tell you when a date opens for booking — it just quietly becomes clickable
 at some point. Rather than refresh the page all day, I wrote this.
 
 It checks the page once an hour on GitHub Actions and emails me the moment an
-upcoming Saturday goes on sale. One HTTP request per run, and it runs whether or
+upcoming Monday goes on sale. One HTTP request per run, and it runs whether or
 not my laptop is on.
 
 If you found this repo looking for how to scrape BookMyShow, skip to
@@ -18,14 +18,15 @@ I'd rather you not lose the afternoon I lost.
 ## What it does
 
 Once an hour it loads the movie's showtimes page, reads which dates are
-currently bookable, and compares that against the next couple of Saturdays. When
+currently bookable, and compares that against the next couple of Mondays (the
+weekday is configurable — see [Tuning](#tuning)). When
 one flips to on-sale, I get an email with a direct booking link.
 
 A real run looks like this:
 
 ```
-Today (IST): 2026-07-28
-Watching:    Saturday, 1 August 2026, Saturday, 8 August 2026
+Today (IST): 2026-07-29
+Watching:    Monday, 3 August 2026, Monday, 10 August 2026
 
 Loading https://in.bookmyshow.com/movies/chennai/the-odyssey/buytickets/ET00480917
 
@@ -34,11 +35,11 @@ Loading https://in.bookmyshow.com/movies/chennai/the-odyssey/buytickets/ET004809
    Google Chrome 144.0.7559.132
    loaded ok (HTTP 200, 282745 bytes)
 
-Booking window on sale: 20260728, 20260729
-Strip covers:           20260728, 20260729, 20260730, 20260731, 20260801, 20260802, 20260803
+Booking window on sale: 20260729, 20260730
+Strip covers:           20260729, 20260730, 20260731, 20260801, 20260802, 20260803, 20260804
 
-Saturday, 1 August 2026 [20260801] -> listed but not on sale
-Saturday, 8 August 2026 [20260808] -> not in booking window yet
+Monday, 3 August 2026 [20260803] -> listed but not on sale
+Monday, 10 August 2026 [20260810] -> not in booking window yet
 ```
 
 It remembers what it has already told me, so I get **one email per date** — not
@@ -87,7 +88,7 @@ rule.
 Each date in the strip carries `styleId: "date-selected"` / `"date-default"` when
 it's on sale, or `"date-disabled"` when it isn't — and disabled dates are rendered
 without a `cta` at all. One page load reports every date at once, which is why
-this only needs a single request per run instead of one per Saturday.
+this only needs a single request per run instead of one per date.
 
 Because the event code in the URL (`ET00480917`) is the **IMAX 2D** event
 (`the-odyssey-imax-2d`), a date going on sale on this page *is* IMAX going on sale.
@@ -223,7 +224,7 @@ Then under **Variables**:
 
 ### 4. Trigger it once by hand
 Actions → "Check IMAX Availability" → **Run workflow**. The log should print the
-booking window and a verdict per Saturday.
+booking window and a verdict per watched date.
 
 Do this before trusting it. All my testing ran from a home IP in India; GitHub's
 runners have different IP reputation with Cloudflare, and that's the one variable
@@ -269,7 +270,8 @@ Everything else — date logic, blocking, alerts — is city and movie agnostic.
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `SATURDAYS_TO_CHECK` | `2` | Set `1` for this week's Saturday only. BookMyShow publishes ~7 days, so further-out Saturdays just read "not in booking window yet" until they come into range |
+| `WATCH_WEEKDAY` | `monday` | Weekday to watch — a name (`monday`, `sat`) or a number (`0`=Sunday … `6`=Saturday). Today counts if it already is that weekday |
+| `DATES_TO_CHECK` | `2` | Set `1` for the coming date only. BookMyShow publishes ~7 days, so further-out dates just read "not in booking window yet" until they come into range |
 | `MAX_ATTEMPTS` | `3` | Retries when blocked. Each gets a fresh browser, a fresh context and a **different** hardware profile |
 | `FINGERPRINT_SEED` | run id + attempt | Replay a specific machine. Copy the seed from a run's `posing as:` log line to reproduce it exactly |
 | `BLOCK_ALERT_THRESHOLD` | `3` | Consecutive failed runs before it emails to say it's blind |
