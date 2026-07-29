@@ -1,6 +1,8 @@
 {
-  "notified": {},
+  "notified": {
+    "20260801": "2026-07-29T11:02:19.324Z"
+  },
   "consecutiveBlocks": 0,
   "blockAlertSent": false,
-  "lastRun": "2026-07-29T10:32:18.585Z"
+  "lastRun": "2026-07-29T11:02:19.324Z"
 }
